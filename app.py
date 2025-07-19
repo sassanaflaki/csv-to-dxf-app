@@ -5,10 +5,8 @@ import tempfile
 import os
 from pyproj import Transformer
 
-# Transformer: WGS84 to MD State Plane (EPSG:2248)
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:2248", always_xy=True)
 
-# DXF generator from multiple CSV files
 def process_multiple_csvs(uploaded_files):
     dfs = []
     base_cols = None
@@ -48,17 +46,23 @@ def process_multiple_csvs(uploaded_files):
         })
 
     df_out = pd.DataFrame(out)
+
+    # Sort by integer ID if it exists
     if 'ID' in df_out.columns:
         df_out['ID_int'] = pd.to_numeric(df_out['ID'], errors='coerce').fillna(0).astype(int)
         df_out = df_out.sort_values('ID_int').drop(columns=['ID_int'])
     else:
         df_out = df_out.reset_index(drop=True)
 
+    # Save processed CSV to a temporary file
+    temp_csv = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8")
+    df_out.to_csv(temp_csv.name, index=False)
+
+    # Generate DXF
     doc = ezdxf.new()
     msp = doc.modelspace()
     size = 0.05
     txt_size = 0.3
-
     for _, row in df_out.iterrows():
         x, y, z = row['X_ft'], row['Y_ft'], row['Ortho_ft']
         layer = 'v-' + row.get('Layer', 'default')
@@ -80,7 +84,9 @@ def process_multiple_csvs(uploaded_files):
 
     temp_dxf = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
     doc.saveas(temp_dxf.name)
-    return temp_dxf.name
+
+    return temp_dxf.name, temp_csv.name  # Return both DXF and CSV paths
+
 
 # Streamlit UI
 st.set_page_config(page_title="CSV to DXF Converter", layout="centered")
@@ -90,8 +96,14 @@ uploaded_files = st.file_uploader("Upload multiple CSV files", type="csv", accep
 
 if uploaded_files:
     st.success(f"{len(uploaded_files)} file(s) uploaded successfully.")
-    if st.button("Generate DXF"):
-        with st.spinner("Processing files and generating DXF..."):
-            dxf_file = process_multiple_csvs(uploaded_files)
+    if st.button("Generate Files"):
+        with st.spinner("Processing and generating files..."):
+            dxf_file, csv_file = process_multiple_csvs(uploaded_files)
+
+            # Download DXF
             with open(dxf_file, "rb") as f:
                 st.download_button("📥 Download DXF", f, file_name="combined_output.dxf", mime="application/dxf")
+
+            # Download CSV
+            with open(csv_file, "rb") as f:
+                st.download_button("📥 Download Combined CSV", f, file_name="processed_points.csv", mime="text/csv")

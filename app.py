@@ -113,6 +113,6 @@ if uploaded_files:
         with st.spinner("Processing and generating DXF..."):
             dxf_file, csv_file = process_csvs(uploaded_files, marker_size, txt_size)
             with open(dxf_file, "rb") as f:
-                st.download_button("\ud83d\udcc5 Download DXF", f, file_name="combined_output.dxf", mime="application/dxf")
+                st.download_button("📥 Download DXF", f, file_name="combined_output.dxf", mime="application/dxf")
             with open(csv_file, "rb") as f:
-                st.download_button("\ud83d\udcc5 Download CSV Summary", f, file_name="combined_summary.csv", mime="text/csv")
+                st.download_button("📥 Download CSV Summary", f, file_name="combined_summary.csv", mime="text/csv")

@@ -4,106 +4,115 @@ import ezdxf
 import tempfile
 import os
 from pyproj import Transformer
+import numpy as np
 
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:2248", always_xy=True)
 
-def process_multiple_csvs(uploaded_files):
-    dfs = []
-    base_cols = None
-
-    for idx, uploaded_file in enumerate(uploaded_files):
-        df = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False, na_filter=False)
-        if idx == 0:
-            base_cols = df.columns.tolist()
-        else:
-            df = df.reindex(columns=base_cols, fill_value='')
-        df["Layer"] = os.path.splitext(uploaded_file.name)[0]
-        dfs.append(df)
-
-    all_pts = pd.concat(dfs, ignore_index=True)
-
-    for col in ['Latitude', 'Longitude', 'Elevation', 'Instrument Ht', 'Ortho Height']:
-        if col in all_pts.columns:
-            all_pts[col] = pd.to_numeric(all_pts[col], errors='coerce')
-
-    all_pts['Instrument Ht'] = all_pts.get('Instrument Ht', pd.Series(0, dtype=float))
-    all_pts = all_pts.dropna(subset=['Latitude', 'Longitude', 'Elevation'])
-
-    out = []
-    for _, r in all_pts.iterrows():
-        lat, lon = float(r['Latitude']), float(r['Longitude'])
-        ell_h = float(r['Elevation'])
-        inst_h = float(r['Instrument Ht'])
-        ortho_h = float(r.get('Ortho Height', ell_h))
-        h_corr = ell_h - inst_h
-        ortho_corr = ortho_h - inst_h
-        x, y = transformer.transform(lon, lat)
-        out.append({
-            **r,
-            'Ortho_ft': ortho_corr * 3.280833333,
-            'X_ft': x,
-            'Y_ft': y,
-        })
-
-    df_out = pd.DataFrame(out)
-
-    # Sort by integer ID if it exists
-    if 'ID' in df_out.columns:
-        df_out['ID_int'] = pd.to_numeric(df_out['ID'], errors='coerce').fillna(0).astype(int)
-        df_out = df_out.sort_values('ID_int').drop(columns=['ID_int'])
+def parse_geometry(geometry_str):
+    if geometry_str.startswith("POINTZ"):
+        coords = geometry_str.strip("POINTZ() ").split()
+        return [(float(coords[0]), float(coords[1]), float(coords[2]))]
+    elif geometry_str.startswith("LINESTRINGZ"):
+        coords = geometry_str.strip("LINESTRINGZ() ").split(",")
+        return [tuple(map(float, c.strip().split())) for c in coords]
+    elif geometry_str.startswith("POLYGONZ"):
+        coords = geometry_str.strip("POLYGONZ() ").strip("(").strip(")").split(",")
+        return [tuple(map(float, c.strip().split())) for c in coords]
     else:
-        df_out = df_out.reset_index(drop=True)
+        return []
 
-    # Save processed CSV to a temporary file
-    temp_csv = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8")
-    df_out.to_csv(temp_csv.name, index=False)
+def transform_point(lon, lat, elev, inst_ht):
+    x, y = transformer.transform(lon, lat)
+    z = (elev + 34.67 - inst_ht) * 3.28084
+    return x, y, z
 
-    # Generate DXF
+def add_point_marker(msp, x, y, z, size, layer, color):
+    msp.add_line((x - size, y - size, z), (x + size, y + size, z), dxfattribs={'layer': layer, 'color': color})
+    msp.add_line((x - size, y + size, z), (x + size, y - size, z), dxfattribs={'layer': layer, 'color': color})
+
+def add_text(msp, text, x, y, z, txt_size, layer, color):
+    msp.add_text(text, dxfattribs={'layer': layer, 'height': txt_size, 'insert': (x, y, z), 'color': color})
+
+def process_csvs(uploaded_files, marker_size, txt_size):
     doc = ezdxf.new()
     msp = doc.modelspace()
-    size = 0.05
-    txt_size = 0.3
-    for _, row in df_out.iterrows():
-        x, y, z = row['X_ft'], row['Y_ft'], row['Ortho_ft']
-        layer = 'v-' + row.get('Layer', 'default')
-        fix = float(row.get('Fix ID', 0))
-        remarks = row.get('Remarks', '')
-        color = ezdxf.colors.RED if fix == 4 else ezdxf.colors.YELLOW
 
-        for lname in [layer, f"{layer}-X", f"{layer}-ORTHO", f"{layer}-ANNO"]:
-            if lname not in doc.layers:
-                doc.layers.new(name=lname)
+    all_records = []
 
-        msp.add_line((x - size, y - size, z), (x + size, y + size, z), dxfattribs={'layer': f"{layer}-X", 'color': color})
-        msp.add_line((x - size, y + size, z), (x + size, y - size, z), dxfattribs={'layer': f"{layer}-X", 'color': color})
-        if fix == 5:
-            msp.add_line((x - size, y, z), (x + size, y, z), dxfattribs={'layer': f"{layer}-X", 'color': color})
-        msp.add_text(f"{z:.2f}", dxfattribs={'layer': f"{layer}-ORTHO", 'height': txt_size, 'insert': (x + size, y + size, z), 'color': color})
-        if not pd.isna(remarks):
-            msp.add_text(remarks, dxfattribs={'layer': f"{layer}-ANNO", 'height': txt_size, 'insert': (x + size, y - size - txt_size, z), 'color': color})
+    for uploaded_file in uploaded_files:
+        df = pd.read_csv(uploaded_file, keep_default_na=False)
+        if 'Geometry' not in df.columns:
+            continue
+
+        for _, row in df.iterrows():
+            name = row.get('Name', row.get('ID', ''))
+            remarks = row.get('Remarks', '')
+            inst_ht = float(row.get('Instrument Ht', 1.6))
+            geometry = row['Geometry']
+            coords = parse_geometry(geometry)
+
+            if geometry.startswith("POINTZ"):
+                lon, lat, elev = coords[0]
+                x, y, z = transform_point(lon, lat, elev, inst_ht)
+                fix = float(row.get('Fix ID', 0))
+                color = ezdxf.colors.RED if fix == 4 else ezdxf.colors.YELLOW
+                layer = 'v-points'
+                if layer not in doc.layers:
+                    doc.layers.new(name=layer, dxfattribs={'color': ezdxf.colors.YELLOW})
+                add_point_marker(msp, x, y, z, marker_size, layer, color)
+                add_text(msp, f"{z:.2f}", x + marker_size, y + marker_size, z, txt_size, layer, color)
+                if remarks:
+                    add_text(msp, remarks, x + marker_size, y - marker_size - txt_size, z, txt_size, layer, color)
+                all_records.append({'Type': 'Point', 'Name': name, 'Remarks': remarks, 'X_ft': x, 'Y_ft': y, 'Z_ft': z})
+
+            elif geometry.startswith("LINESTRINGZ"):
+                vertices = [transform_point(lon, lat, elev, inst_ht) for lon, lat, elev in coords]
+                layer = f"v-lines-{name}"
+                if layer not in doc.layers:
+                    doc.layers.new(name=layer, dxfattribs={'color': ezdxf.colors.BLUE})
+                msp.add_lwpolyline([(vx, vy, vz) for vx, vy, vz in vertices], dxfattribs={'layer': layer, 'color': 256})
+                for vx, vy, vz in vertices:
+                    add_point_marker(msp, vx, vy, vz, marker_size, layer, ezdxf.colors.BLUE)
+                mid = vertices[len(vertices)//2]
+                add_text(msp, name, mid[0], mid[1], mid[2], txt_size, layer, ezdxf.colors.BLUE)
+                all_records.append({'Type': 'Line', 'Name': name, 'Remarks': remarks, 'Vertices': vertices})
+
+            elif geometry.startswith("POLYGONZ"):
+                vertices = [transform_point(lon, lat, elev, inst_ht) for lon, lat, elev in coords]
+                layer = f"v-polygons-{name}"
+                if layer not in doc.layers:
+                    doc.layers.new(name=layer, dxfattribs={'color': ezdxf.colors.GREEN})
+                msp.add_lwpolyline([(vx, vy, vz) for vx, vy, vz in vertices], close=True, dxfattribs={'layer': layer, 'color': 256})
+                for vx, vy, vz in vertices:
+                    add_point_marker(msp, vx, vy, vz, marker_size, layer, ezdxf.colors.GREEN)
+                centroid_x = np.mean([vx for vx, vy, vz in vertices])
+                centroid_y = np.mean([vy for vx, vy, vz in vertices])
+                centroid_z = np.mean([vz for vx, vy, vz in vertices])
+                add_text(msp, f"{name}\n{remarks}", centroid_x, centroid_y, centroid_z, txt_size, layer, ezdxf.colors.GREEN)
+                all_records.append({'Type': 'Polygon', 'Name': name, 'Remarks': remarks, 'Vertices': vertices})
 
     temp_dxf = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
     doc.saveas(temp_dxf.name)
-
-    return temp_dxf.name, temp_csv.name  # Return both DXF and CSV paths
-
+    df_out = pd.DataFrame(all_records)
+    temp_csv = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8")
+    df_out.to_csv(temp_csv.name, index=False)
+    return temp_dxf.name, temp_csv.name
 
 # Streamlit UI
-st.set_page_config(page_title="CSV to DXF Converter", layout="centered")
-st.title("📐 CSV to DXF Converter")
+st.set_page_config(page_title="CSV to DXF Converter (Unified)", layout="centered")
+st.title("\ud83d\udcc0 CSV to DXF Converter (Unified)")
 
-uploaded_files = st.file_uploader("Upload multiple CSV files", type="csv", accept_multiple_files=True)
+marker_size = st.slider("Marker Size", 0.01, 1.0, 0.05)
+txt_size = st.slider("Text Size", 0.1, 2.0, 0.3)
+
+uploaded_files = st.file_uploader("Upload CSV files (points, lines, polygons)", type="csv", accept_multiple_files=True)
 
 if uploaded_files:
     st.success(f"{len(uploaded_files)} file(s) uploaded successfully.")
-    if st.button("Generate Files"):
-        with st.spinner("Processing and generating files..."):
-            dxf_file, csv_file = process_multiple_csvs(uploaded_files)
-
-            # Download DXF
+    if st.button("Generate DXF"):
+        with st.spinner("Processing and generating DXF..."):
+            dxf_file, csv_file = process_csvs(uploaded_files, marker_size, txt_size)
             with open(dxf_file, "rb") as f:
-                st.download_button("📥 Download DXF", f, file_name="combined_output.dxf", mime="application/dxf")
-
-            # Download CSV
+                st.download_button("\ud83d\udcc5 Download DXF", f, file_name="combined_output.dxf", mime="application/dxf")
             with open(csv_file, "rb") as f:
-                st.download_button("📥 Download Combined CSV", f, file_name="processed_points.csv", mime="text/csv")
+                st.download_button("\ud83d\udcc5 Download CSV Summary", f, file_name="combined_summary.csv", mime="text/csv")

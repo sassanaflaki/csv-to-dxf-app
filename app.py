@@ -62,12 +62,16 @@ def process_csvs(uploaded_files, marker_size, txt_size):
                     add_text(msp, remarks, x + marker_size, y - marker_size - txt_size, z, txt_size, layer, color)
                 all_records.append({'Type': 'Point', 'Name': name, 'Remarks': remarks, 'X_ft': x, 'Y_ft': y, 'Z_ft': z})
             elif geometry.startswith("LINESTRINGZ"):
+                # For lines, third value is actually elevation, not width. Width fixed to 0.
                 vertices = [transform_point(lon, lat, elev, inst_ht) for lon, lat, elev in coords]
                 layer = f"v-lines-{name}"
                 if layer not in doc.layers:
                     doc.layers.new(name=layer, dxfattribs={'color': ezdxf.colors.BLUE})
-                msp.add_lwpolyline([(vx, vy, vz) for vx, vy, vz in vertices], dxfattribs={'layer': layer, 'color': 256})
+                # Create polyline with width 0 and actual Z assigned from the elevation
+                lwpoly = msp.add_lwpolyline([(vx, vy) for vx, vy, vz in vertices], dxfattribs={'layer': layer, 'color': 256})
+                lwpoly.dxf.elevation = 0  # 2D polyline elevation baseline
                 for vx, vy, vz in vertices:
+                    msp.add_point((vx, vy, vz), dxfattribs={'layer': layer, 'color': 256})
                     add_point_marker(msp, vx, vy, vz, marker_size, layer, ezdxf.colors.BLUE)
                 mid = vertices[len(vertices)//2]
                 add_text(msp, name, mid[0], mid[1], mid[2], txt_size, layer, ezdxf.colors.BLUE)
@@ -77,7 +81,7 @@ def process_csvs(uploaded_files, marker_size, txt_size):
                 layer = f"v-polygons-{name}"
                 if layer not in doc.layers:
                     doc.layers.new(name=layer, dxfattribs={'color': ezdxf.colors.GREEN})
-                msp.add_lwpolyline([(vx, vy, vz) for vx, vy, vz in vertices], close=True, dxfattribs={'layer': layer, 'color': 256})
+                msp.add_lwpolyline([(vx, vy) for vx, vy, vz in vertices], close=True, dxfattribs={'layer': layer, 'color': 256})
                 for vx, vy, vz in vertices:
                     add_point_marker(msp, vx, vy, vz, marker_size, layer, ezdxf.colors.GREEN)
                 centroid_x = np.mean([vx for vx, vy, vz in vertices])
@@ -97,15 +101,12 @@ def process_csvs(uploaded_files, marker_size, txt_size):
 st.set_page_config(page_title="CSV to DXF Converter (Unified)", layout="centered")
 st.title("📐 CSV to DXF Converter (Unified)")
 
-# Initialize session state if not present
 if "dxf_path" not in st.session_state:
     st.session_state.dxf_path = None
     st.session_state.csv_path = None
 
 marker_size = st.slider("Marker Size", 0.01, 1.0, 0.05)
 txt_size = st.slider("Text Size", 0.1, 2.0, 0.3)
-
-# New: filename inputs
 output_dxf_name = st.text_input("Output DXF filename", "combined_output.dxf")
 output_csv_name = st.text_input("Output CSV filename", "combined_summary.csv")
 
@@ -118,7 +119,6 @@ if st.button("Generate DXF") and uploaded_files:
         st.session_state.csv_path = csv_file
         st.success("DXF and CSV generated successfully. Scroll down to download.")
 
-# Show download buttons if files exist in session state
 if st.session_state.dxf_path and st.session_state.csv_path:
     with open(st.session_state.dxf_path, "rb") as f:
         st.download_button("📥 Download DXF", f, file_name=output_dxf_name, mime="application/dxf")

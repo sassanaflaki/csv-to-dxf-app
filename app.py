@@ -36,21 +36,18 @@ def add_text(msp, text, x, y, z, txt_size, layer, color):
 def process_csvs(uploaded_files, marker_size, txt_size):
     doc = ezdxf.new()
     msp = doc.modelspace()
-
     all_records = []
 
     for uploaded_file in uploaded_files:
         df = pd.read_csv(uploaded_file, keep_default_na=False)
         if 'Geometry' not in df.columns:
             continue
-
         for _, row in df.iterrows():
             name = row.get('Name', row.get('ID', ''))
             remarks = row.get('Remarks', '')
             inst_ht = float(row.get('Instrument Ht', 1.6))
             geometry = row['Geometry']
             coords = parse_geometry(geometry)
-
             if geometry.startswith("POINTZ"):
                 lon, lat, elev = coords[0]
                 x, y, z = transform_point(lon, lat, elev, inst_ht)
@@ -64,7 +61,6 @@ def process_csvs(uploaded_files, marker_size, txt_size):
                 if remarks:
                     add_text(msp, remarks, x + marker_size, y - marker_size - txt_size, z, txt_size, layer, color)
                 all_records.append({'Type': 'Point', 'Name': name, 'Remarks': remarks, 'X_ft': x, 'Y_ft': y, 'Z_ft': z})
-
             elif geometry.startswith("LINESTRINGZ"):
                 vertices = [transform_point(lon, lat, elev, inst_ht) for lon, lat, elev in coords]
                 layer = f"v-lines-{name}"
@@ -76,7 +72,6 @@ def process_csvs(uploaded_files, marker_size, txt_size):
                 mid = vertices[len(vertices)//2]
                 add_text(msp, name, mid[0], mid[1], mid[2], txt_size, layer, ezdxf.colors.BLUE)
                 all_records.append({'Type': 'Line', 'Name': name, 'Remarks': remarks, 'Vertices': vertices})
-
             elif geometry.startswith("POLYGONZ"):
                 vertices = [transform_point(lon, lat, elev, inst_ht) for lon, lat, elev in coords]
                 layer = f"v-polygons-{name}"
@@ -98,21 +93,34 @@ def process_csvs(uploaded_files, marker_size, txt_size):
     df_out.to_csv(temp_csv.name, index=False)
     return temp_dxf.name, temp_csv.name
 
-# Streamlit UI
+# --- Streamlit App ---
 st.set_page_config(page_title="CSV to DXF Converter (Unified)", layout="centered")
 st.title("📐 CSV to DXF Converter (Unified)")
+
+# Initialize session state if not present
+if "dxf_path" not in st.session_state:
+    st.session_state.dxf_path = None
+    st.session_state.csv_path = None
 
 marker_size = st.slider("Marker Size", 0.01, 1.0, 0.05)
 txt_size = st.slider("Text Size", 0.1, 2.0, 0.3)
 
+# New: filename inputs
+output_dxf_name = st.text_input("Output DXF filename", "combined_output.dxf")
+output_csv_name = st.text_input("Output CSV filename", "combined_summary.csv")
+
 uploaded_files = st.file_uploader("Upload CSV files (points, lines, polygons)", type="csv", accept_multiple_files=True)
 
-if uploaded_files:
-    st.success(f"{len(uploaded_files)} file(s) uploaded successfully.")
-    if st.button("Generate DXF"):
-        with st.spinner("Processing and generating DXF..."):
-            dxf_file, csv_file = process_csvs(uploaded_files, marker_size, txt_size)
-            with open(dxf_file, "rb") as f:
-                st.download_button("📥 Download DXF", f, file_name="combined_output.dxf", mime="application/dxf")
-            with open(csv_file, "rb") as f:
-                st.download_button("📥 Download CSV Summary", f, file_name="combined_summary.csv", mime="text/csv")
+if st.button("Generate DXF") and uploaded_files:
+    with st.spinner("Processing and generating DXF..."):
+        dxf_file, csv_file = process_csvs(uploaded_files, marker_size, txt_size)
+        st.session_state.dxf_path = dxf_file
+        st.session_state.csv_path = csv_file
+        st.success("DXF and CSV generated successfully. Scroll down to download.")
+
+# Show download buttons if files exist in session state
+if st.session_state.dxf_path and st.session_state.csv_path:
+    with open(st.session_state.dxf_path, "rb") as f:
+        st.download_button("📥 Download DXF", f, file_name=output_dxf_name, mime="application/dxf")
+    with open(st.session_state.csv_path, "rb") as f:
+        st.download_button("📥 Download CSV Summary", f, file_name=output_csv_name, mime="text/csv")

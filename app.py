@@ -100,7 +100,7 @@ def process_csvs(uploaded_files, marker_size, txt_size):
 
 # Streamlit UI
 st.set_page_config(page_title="CSV to DXF Converter (Unified)", layout="centered")
-st.title("\ud83d\udcc0 CSV to DXF Converter (Unified)")
+st.title("📐 CSV to DXF Converter (Unified)")
 
 marker_size = st.slider("Marker Size", 0.01, 1.0, 0.05)
 txt_size = st.slider("Text Size", 0.1, 2.0, 0.3)
